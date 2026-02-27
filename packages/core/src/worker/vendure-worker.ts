@@ -38,6 +38,8 @@ export class VendureWorker {
      * verify whether the worker is running.
      *
      * @since 1.2.0
+     * @deprecated Use infrastructure-level health checks (e.g. Kubernetes probes, Docker healthchecks)
+     * instead of this built-in health check server. This method will be removed in v4.0.0.
      */
     async startHealthCheckServer(healthCheckConfig: WorkerHealthCheckConfig): Promise<VendureWorker> {
         await this.app.get(WorkerHealthService).initializeHealthCheckEndpoint(healthCheckConfig);

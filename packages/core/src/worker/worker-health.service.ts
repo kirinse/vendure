@@ -10,6 +10,8 @@ import { Logger } from '../config/logger/vendure-logger';
  *
  * @since 1.2.0
  * @docsCategory worker
+ * @deprecated Use infrastructure-level health checks instead of application-level health checks.
+ * This interface will be removed in v4.0.0.
  */
 export interface WorkerHealthCheckConfig {
     /**
@@ -33,6 +35,10 @@ export interface WorkerHealthCheckConfig {
     route?: string;
 }
 
+/**
+ * @deprecated Use infrastructure-level health checks instead of application-level health checks.
+ * This service will be removed in v4.0.0.
+ */
 @Injectable()
 export class WorkerHealthService implements OnModuleDestroy {
     private server: http.Server | undefined;
