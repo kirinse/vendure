@@ -1,15 +1,18 @@
 import { SUPER_ADMIN_USER_IDENTIFIER } from '@vendure/common/lib/shared-constants';
 import {
     EntityAccessControlStrategy,
+    ID,
+    Injector,
     mergeConfig,
     Product,
     RequestContext,
+    TransactionalConnection,
     VendureEntity,
 } from '@vendure/core';
 import { createTestEnvironment } from '@vendure/testing';
 import gql from 'graphql-tag';
 import path from 'path';
-import { SelectQueryBuilder } from 'typeorm';
+import { LessThanOrEqual, SelectQueryBuilder } from 'typeorm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { initialData } from '../../../e2e-common/e2e-initial-data';
@@ -47,13 +50,65 @@ const RAW_REPOSITORY_PRODUCT = gql`
 `;
 
 /**
- * Test strategy that restricts non-superadmin users to only see
- * products with id <= 5. SuperAdmin users are not restricted.
+ * Two-phase test strategy demonstrating the WeakMap + prepareAccessControl pattern.
  *
- * We use `id` because it's a real column on the product table
- * (unlike `name`/`slug` which are on the translations table).
+ * - `prepareAccessControl()`: Performs an async DB lookup via rawConnection
+ *   to find allowed product IDs, caches them per-request on a WeakMap.
+ * - `applyAccessControl()`: Reads the cached IDs synchronously and filters.
+ *
+ * This pattern is needed when the access control logic requires an async
+ * operation (DB lookup, external API call) that can't be expressed as a
+ * simple SQL subquery.
  */
 class TestEntityAccessControlStrategy implements EntityAccessControlStrategy {
+    /**
+     * WeakMap keyed on RequestContext — entries are automatically garbage
+     * collected when the request ends and the ctx reference is released.
+     */
+    private allowedProductIds = new WeakMap<RequestContext, ID[]>();
+    private connection: TransactionalConnection;
+    prepareCallCount = 0;
+
+    init(injector: Injector) {
+        this.connection = injector.get(TransactionalConnection);
+    }
+
+    /**
+     * Async phase: runs once per request in the AuthGuard. Performs a DB
+     * lookup to determine which products this user may access, and stashes
+     * the result in the WeakMap.
+     *
+     * IMPORTANT: Uses `rawConnection.getRepository()` (NOT the ctx-aware
+     * `getRepository(ctx, ...)`) to avoid triggering the access-control
+     * Proxy and causing infinite recursion.
+     */
+    async prepareAccessControl(ctx: RequestContext): Promise<void> {
+        this.prepareCallCount++;
+
+        // SuperAdmin bypasses access control — no cache entry means "no restrictions"
+        const user = ctx.session?.user;
+        if (!user || user.identifier === SUPER_ADMIN_USER_IDENTIFIER) {
+            return;
+        }
+
+        // Simulate an async lookup: query the DB for allowed product IDs.
+        // In a real implementation this might look up seller assignments,
+        // role-based category access, or call an external permissions API.
+        const products = await this.connection.rawConnection.getRepository(Product).find({
+            where: { id: LessThanOrEqual(5) },
+            select: ['id'],
+        });
+        this.allowedProductIds.set(
+            ctx,
+            products.map(p => p.id),
+        );
+    }
+
+    /**
+     * Sync phase: runs for every query. Reads the cached allowed IDs from
+     * the WeakMap and applies the filter. If there's no cache entry (i.e.
+     * SuperAdmin), this is a no-op.
+     */
     applyAccessControl<T extends VendureEntity>(
         qb: SelectQueryBuilder<T>,
         entityType: new (...args: any[]) => T,
@@ -62,25 +117,23 @@ class TestEntityAccessControlStrategy implements EntityAccessControlStrategy {
         if (entityType !== Product) {
             return;
         }
-        // SuperAdmin bypasses access control
-        if (ctx.activeUserId == null) {
-            return;
-        }
-        const user = ctx.session?.user;
-        if (user?.identifier === SUPER_ADMIN_USER_IDENTIFIER) {
+
+        const allowedIds = this.allowedProductIds.get(ctx);
+        if (!allowedIds) {
+            // No cache entry = no restrictions (SuperAdmin, or no prepare phase)
             return;
         }
 
-        // Restricted admin can only see products with id <= 5
-        qb.andWhere(`${qb.alias}.id <= :acl_max_id`, { acl_max_id: 5 });
+        qb.andWhere(`${qb.alias}.id IN (:...acl_allowed_ids)`, { acl_allowed_ids: allowedIds });
     }
 }
 
 describe('EntityAccessControlStrategy', () => {
+    const testStrategy = new TestEntityAccessControlStrategy();
     const { server, adminClient } = createTestEnvironment(
         mergeConfig(testConfig(), {
             authOptions: {
-                entityAccessControlStrategy: new TestEntityAccessControlStrategy(),
+                entityAccessControlStrategy: testStrategy,
             },
             plugins: [EntityAccessControlTestPlugin],
         }),
@@ -237,6 +290,46 @@ describe('EntityAccessControlStrategy', () => {
             // T_1 has id <= 5 — visible through the Proxy
             expect(rawRepositoryProduct).not.toBeNull();
             expect(rawRepositoryProduct.id).toBe('T_1');
+        });
+    });
+
+    describe('Two-phase prepareAccessControl behavior', () => {
+        it('prepareAccessControl is called once per request (AuthGuard hook)', async () => {
+            const countBefore = testStrategy.prepareCallCount;
+            await adminClient.asSuperAdmin();
+
+            // Each GraphQL query triggers the AuthGuard, which calls prepareAccessControl
+            await adminClient.query<GetProductListQuery, GetProductListQueryVariables>(GET_PRODUCT_LIST, {
+                options: { take: 5 },
+            });
+            const countAfterFirst = testStrategy.prepareCallCount;
+            expect(countAfterFirst).toBeGreaterThan(countBefore);
+
+            // A second request should increment the counter again
+            await adminClient.query<GetProductListQuery, GetProductListQueryVariables>(GET_PRODUCT_LIST, {
+                options: { take: 5 },
+            });
+            const countAfterSecond = testStrategy.prepareCallCount;
+            expect(countAfterSecond).toBeGreaterThan(countAfterFirst);
+        });
+
+        it('each request gets its own isolated cache entry (WeakMap isolation)', async () => {
+            // Login as restricted admin
+            await adminClient.asUserWithCredentials('restricted@admin.com', 'restricted');
+
+            // Two consecutive requests should both be filtered correctly,
+            // proving that each request gets its own WeakMap entry
+            const { products: result1 } = await adminClient.query<
+                GetProductListQuery,
+                GetProductListQueryVariables
+            >(GET_PRODUCT_LIST, { options: { take: 100 } });
+            expect(result1.totalItems).toBe(5);
+
+            const { products: result2 } = await adminClient.query<
+                GetProductListQuery,
+                GetProductListQueryVariables
+            >(GET_PRODUCT_LIST, { options: { take: 100 } });
+            expect(result2.totalItems).toBe(5);
         });
     });
 });

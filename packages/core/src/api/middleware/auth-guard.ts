@@ -72,6 +72,11 @@ export class AuthGuard implements CanActivate {
                 );
             }
             internal_setRequestContext(req, requestContext, context);
+
+            const accessControlStrategy = this.configService.authOptions.entityAccessControlStrategy;
+            if (accessControlStrategy?.prepareAccessControl) {
+                await accessControlStrategy.prepareAccessControl(requestContext);
+            }
         }
 
         if (authDisabled || !permissions || isPublic) {
