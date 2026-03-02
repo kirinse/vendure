@@ -520,7 +520,7 @@ export interface AuthOptions {
      * query that goes through Vendure's data access layer, allowing you to restrict
      * which entities are visible to the current user.
      *
-     * @default undefined
+     * @default DefaultEntityAccessControlStrategy
      * @since 3.3.0
      */
     entityAccessControlStrategy?: EntityAccessControlStrategy;

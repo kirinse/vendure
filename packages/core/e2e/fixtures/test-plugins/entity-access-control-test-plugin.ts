@@ -38,6 +38,25 @@ class EntityAccessControlTestResolver {
         });
         return product ? { id: product.id.toString() } : null;
     }
+
+    /**
+     * Uses getRepository(ctx, Product).findAndCount() — exercises the Proxy path.
+     */
+    @Query()
+    async rawRepositoryProductFindAndCount(@Ctx() ctx: RequestContext): Promise<number> {
+        const [items, count] = await this.connection.getRepository(ctx, Product).findAndCount({
+            order: { id: 'ASC' },
+        });
+        return count;
+    }
+
+    /**
+     * Uses getRepository(ctx, Product).count() — exercises the Proxy path.
+     */
+    @Query()
+    async rawRepositoryProductCount(@Ctx() ctx: RequestContext): Promise<number> {
+        return this.connection.getRepository(ctx, Product).count();
+    }
 }
 
 @VendurePlugin({
@@ -47,6 +66,8 @@ class EntityAccessControlTestResolver {
             extend type Query {
                 rawRepositoryProductIds: [String!]!
                 rawRepositoryProduct(id: ID!): JSON
+                rawRepositoryProductFindAndCount: Int!
+                rawRepositoryProductCount: Int!
             }
         `,
         resolvers: [EntityAccessControlTestResolver],

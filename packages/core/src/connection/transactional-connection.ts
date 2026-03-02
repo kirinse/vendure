@@ -29,6 +29,18 @@ import { TransactionWrapper } from './transaction-wrapper';
 import { GetEntityOrThrowOptions } from './types';
 
 /**
+ * Repository methods intercepted by the access control Proxy.
+ * Hoisted to module level to avoid re-creating the Set on every getRepository() call.
+ */
+const ACCESS_CONTROL_INTERCEPTED_METHODS = new Set([
+    'find',
+    'findOne',
+    'findOneOrFail',
+    'findAndCount',
+    'count',
+]);
+
+/**
  * @description
  * The TransactionalConnection is a wrapper around the TypeORM `Connection` object which works in conjunction
  * with the {@link Transaction} decorator to implement per-request transactions. All services which access the
@@ -405,10 +417,9 @@ export class TransactionalConnection {
         ctx: RequestContext,
         strategy: EntityAccessControlStrategy,
     ): Repository<Entity> {
-        const interceptedMethods = new Set(['find', 'findOne', 'findOneOrFail', 'findAndCount', 'count']);
         return new Proxy(repo, {
             get(obj, prop, receiver) {
-                if (typeof prop === 'string' && interceptedMethods.has(prop)) {
+                if (typeof prop === 'string' && ACCESS_CONTROL_INTERCEPTED_METHODS.has(prop)) {
                     return (options: FindOneOptions<Entity> | FindManyOptions<Entity> = {}) => {
                         const alias = obj.metadata.name;
                         const qb = obj.createQueryBuilder(alias);

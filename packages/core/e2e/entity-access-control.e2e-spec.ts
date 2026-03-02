@@ -49,6 +49,18 @@ const RAW_REPOSITORY_PRODUCT = gql`
     }
 `;
 
+const RAW_REPOSITORY_PRODUCT_FIND_AND_COUNT = gql`
+    query RawRepositoryProductFindAndCount {
+        rawRepositoryProductFindAndCount
+    }
+`;
+
+const RAW_REPOSITORY_PRODUCT_COUNT = gql`
+    query RawRepositoryProductCount {
+        rawRepositoryProductCount
+    }
+`;
+
 /**
  * Test strategy demonstrating the full pattern:
  *
@@ -304,6 +316,65 @@ describe('EntityAccessControlStrategy', () => {
             // T_1 has id <= 5 — visible through the Proxy
             expect(rawRepositoryProduct).not.toBeNull();
             expect(rawRepositoryProduct.id).toBe('T_1');
+        });
+
+        it('sees filtered count via raw repository findAndCount (getRepository Proxy path)', async () => {
+            const { rawRepositoryProductFindAndCount } = await adminClient.query(
+                RAW_REPOSITORY_PRODUCT_FIND_AND_COUNT,
+            );
+            expect(rawRepositoryProductFindAndCount).toBe(5);
+        });
+
+        it('sees filtered count via raw repository count (getRepository Proxy path)', async () => {
+            const { rawRepositoryProductCount } = await adminClient.query(RAW_REPOSITORY_PRODUCT_COUNT);
+            expect(rawRepositoryProductCount).toBe(5);
+        });
+    });
+
+    describe('evaluateAccess denial', () => {
+        it('returns ForbiddenError when user lacks required permissions', async () => {
+            await adminClient.asSuperAdmin();
+
+            // Create a role with NO catalog permissions
+            const { createRole } = await adminClient.query<CreateRoleMutation, CreateRoleMutationVariables>(
+                CREATE_ROLE,
+                {
+                    input: {
+                        channelIds: ['T_1'],
+                        code: 'no-catalog-role',
+                        description: 'A role with no catalog permissions',
+                        permissions: [],
+                    },
+                },
+            );
+
+            // Create an admin with that role
+            await adminClient.query<CreateAdministratorMutation, CreateAdministratorMutationVariables>(
+                CREATE_ADMINISTRATOR,
+                {
+                    input: {
+                        firstName: 'NoCatalog',
+                        lastName: 'Admin',
+                        emailAddress: 'nocatalog@admin.com',
+                        password: 'nocatalog',
+                        roleIds: [createRole.id],
+                    },
+                },
+            );
+
+            // Log in as the no-catalog admin
+            await adminClient.asUserWithCredentials('nocatalog@admin.com', 'nocatalog');
+
+            // This should fail with FORBIDDEN because evaluateAccess returns false
+            // (the admin has no ReadCatalog/ReadProduct permission)
+            try {
+                await adminClient.query<GetProductListQuery, GetProductListQueryVariables>(GET_PRODUCT_LIST, {
+                    options: { take: 10 },
+                });
+                expect.unreachable('Should have thrown');
+            } catch (e: any) {
+                expect(e.response.errors[0].extensions.code).toBe('FORBIDDEN');
+            }
         });
     });
 
