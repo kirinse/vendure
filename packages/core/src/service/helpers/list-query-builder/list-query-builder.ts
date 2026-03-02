@@ -349,7 +349,7 @@ export class ListQueryBuilder implements OnApplicationBootstrap {
 
         qb.orderBy(sort);
         if (extendedOptions.ctx) {
-            this.configService.authOptions.entityAccessControlStrategy?.applyAccessControl(
+            this.configService.authOptions.entityAccessControlStrategy?.applyAccessControl?.(
                 qb,
                 entity,
                 extendedOptions.ctx,

@@ -34,8 +34,6 @@ import { PERMISSIONS_METADATA_KEY } from '../decorators/allow.decorator';
  */
 @Injectable()
 export class AuthGuard implements CanActivate {
-    strategy: any;
-
     constructor(
         private reflector: Reflector,
         private configService: ConfigService,
@@ -53,7 +51,6 @@ export class AuthGuard implements CanActivate {
             return true;
         }
         const authDisabled = this.configService.authOptions.disableAuth;
-        const isPublic = !!permissions && permissions.includes(Permission.Public);
         const hasOwnerPermission = !!permissions && permissions.includes(Permission.Owner);
         let requestContext: RequestContext;
         if (targetIsFieldResolver) {
@@ -72,24 +69,17 @@ export class AuthGuard implements CanActivate {
                 );
             }
             internal_setRequestContext(req, requestContext, context);
-
-            const accessControlStrategy = this.configService.authOptions.entityAccessControlStrategy;
-            if (accessControlStrategy?.prepareAccessControl) {
-                await accessControlStrategy.prepareAccessControl(requestContext);
-            }
         }
 
-        if (authDisabled || !permissions || isPublic) {
+        if (authDisabled) {
             return true;
-        } else {
-            const canActivate =
-                requestContext.userHasPermissions(permissions) || requestContext.authorizedAsOwnerOnly;
-            if (!canActivate) {
-                throw new ForbiddenError(LogLevel.Verbose);
-            } else {
-                return canActivate;
-            }
         }
+        const strategy = this.configService.authOptions.entityAccessControlStrategy;
+        const isAllowed = await strategy.evaluateAccess(requestContext, permissions ?? []);
+        if (!isAllowed) {
+            throw new ForbiddenError(LogLevel.Verbose);
+        }
+        return true;
     }
 
     private async setActiveChannel(

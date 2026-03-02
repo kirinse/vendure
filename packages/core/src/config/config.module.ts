@@ -159,7 +159,7 @@ export class ConfigModule implements OnApplicationBootstrap, OnApplicationShutdo
             ...(instrumentationStrategy ? [instrumentationStrategy] : []),
             ...orderInterceptors,
             schedulerStrategy,
-            ...(entityAccessControlStrategy ? [entityAccessControlStrategy] : []),
+            entityAccessControlStrategy,
         ];
     }
 

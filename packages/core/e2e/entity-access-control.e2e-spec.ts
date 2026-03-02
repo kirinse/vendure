@@ -1,6 +1,7 @@
+import { Permission } from '@vendure/common/lib/generated-types';
 import { SUPER_ADMIN_USER_IDENTIFIER } from '@vendure/common/lib/shared-constants';
 import {
-    EntityAccessControlStrategy,
+    DefaultEntityAccessControlStrategy,
     ID,
     Injector,
     mergeConfig,
@@ -28,7 +29,6 @@ import {
     GetProductListQueryVariables,
     GetProductSimpleQuery,
     GetProductSimpleQueryVariables,
-    Permission,
 } from './graphql/generated-e2e-admin-types';
 import {
     CREATE_ADMINISTRATOR,
@@ -50,45 +50,57 @@ const RAW_REPOSITORY_PRODUCT = gql`
 `;
 
 /**
- * Two-phase test strategy demonstrating the WeakMap + prepareAccessControl pattern.
+ * Test strategy demonstrating the full pattern:
  *
- * - `prepareAccessControl()`: Performs an async DB lookup via rawConnection
- *   to find allowed product IDs, caches them per-request on a WeakMap.
- * - `applyAccessControl()`: Reads the cached IDs synchronously and filters.
+ * - Extends `DefaultEntityAccessControlStrategy` to preserve standard permission logic.
+ * - Overrides `evaluateAccess()` to pre-load allowed product IDs after calling super.
+ * - Implements `applyAccessControl()` for row-level filtering.
  *
- * This pattern is needed when the access control logic requires an async
- * operation (DB lookup, external API call) that can't be expressed as a
- * simple SQL subquery.
+ * Uses a WeakMap<RequestContext, ID[]> so that per-request data is automatically
+ * garbage-collected when the request ends.
  */
-class TestEntityAccessControlStrategy implements EntityAccessControlStrategy {
+class TestEntityAccessControlStrategy extends DefaultEntityAccessControlStrategy {
     /**
      * WeakMap keyed on RequestContext — entries are automatically garbage
      * collected when the request ends and the ctx reference is released.
      */
     private allowedProductIds = new WeakMap<RequestContext, ID[]>();
     private connection: TransactionalConnection;
-    prepareCallCount = 0;
+    evaluateAccessCallCount = 0;
 
     init(injector: Injector) {
         this.connection = injector.get(TransactionalConnection);
     }
 
     /**
-     * Async phase: runs once per request in the AuthGuard. Performs a DB
-     * lookup to determine which products this user may access, and stashes
-     * the result in the WeakMap.
+     * Gate-level + pre-loading phase: runs once per request in the AuthGuard.
+     *
+     * 1. Delegates to super for standard Vendure permission evaluation.
+     * 2. If allowed, performs an async DB lookup to determine which products
+     *    this user may access and stashes the result in the WeakMap.
      *
      * IMPORTANT: Uses `rawConnection.getRepository()` (NOT the ctx-aware
      * `getRepository(ctx, ...)`) to avoid triggering the access-control
      * Proxy and causing infinite recursion.
      */
-    async prepareAccessControl(ctx: RequestContext): Promise<void> {
-        this.prepareCallCount++;
+    async evaluateAccess(ctx: RequestContext, permissions: Permission[]): Promise<boolean> {
+        this.evaluateAccessCallCount++;
 
-        // SuperAdmin bypasses access control — no cache entry means "no restrictions"
+        // Delegate to DefaultEntityAccessControlStrategy for standard permission checks
+        const allowed = await super.evaluateAccess(ctx, permissions);
+        if (!allowed) {
+            return false;
+        }
+
+        // SuperAdmin bypasses row-level access control — no cache entry means "no restrictions"
         const user = ctx.session?.user;
         if (!user || user.identifier === SUPER_ADMIN_USER_IDENTIFIER) {
-            return;
+            return true;
+        }
+
+        // Only pre-load once per request (WeakMap deduplication)
+        if (this.allowedProductIds.has(ctx)) {
+            return true;
         }
 
         // Simulate an async lookup: query the DB for allowed product IDs.
@@ -102,10 +114,12 @@ class TestEntityAccessControlStrategy implements EntityAccessControlStrategy {
             ctx,
             products.map(p => p.id),
         );
+
+        return true;
     }
 
     /**
-     * Sync phase: runs for every query. Reads the cached allowed IDs from
+     * Row-level phase: runs for every query. Reads the cached allowed IDs from
      * the WeakMap and applies the filter. If there's no cache entry (i.e.
      * SuperAdmin), this is a no-op.
      */
@@ -120,7 +134,7 @@ class TestEntityAccessControlStrategy implements EntityAccessControlStrategy {
 
         const allowedIds = this.allowedProductIds.get(ctx);
         if (!allowedIds) {
-            // No cache entry = no restrictions (SuperAdmin, or no prepare phase)
+            // No cache entry = no restrictions (SuperAdmin, or no evaluate phase)
             return;
         }
 
@@ -293,23 +307,23 @@ describe('EntityAccessControlStrategy', () => {
         });
     });
 
-    describe('Two-phase prepareAccessControl behavior', () => {
-        it('prepareAccessControl is called once per request (AuthGuard hook)', async () => {
-            const countBefore = testStrategy.prepareCallCount;
+    describe('evaluateAccess behavior', () => {
+        it('evaluateAccess is called once per request (AuthGuard hook)', async () => {
+            const countBefore = testStrategy.evaluateAccessCallCount;
             await adminClient.asSuperAdmin();
 
-            // Each GraphQL query triggers the AuthGuard, which calls prepareAccessControl
+            // Each GraphQL query triggers the AuthGuard, which calls evaluateAccess
             await adminClient.query<GetProductListQuery, GetProductListQueryVariables>(GET_PRODUCT_LIST, {
                 options: { take: 5 },
             });
-            const countAfterFirst = testStrategy.prepareCallCount;
+            const countAfterFirst = testStrategy.evaluateAccessCallCount;
             expect(countAfterFirst).toBeGreaterThan(countBefore);
 
             // A second request should increment the counter again
             await adminClient.query<GetProductListQuery, GetProductListQueryVariables>(GET_PRODUCT_LIST, {
                 options: { take: 5 },
             });
-            const countAfterSecond = testStrategy.prepareCallCount;
+            const countAfterSecond = testStrategy.evaluateAccessCallCount;
             expect(countAfterSecond).toBeGreaterThan(countAfterFirst);
         });
 

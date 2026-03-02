@@ -20,7 +20,6 @@ import { TRANSACTION_MANAGER_KEY } from '../common/constants';
 import { EntityNotFoundError } from '../common/error/errors';
 import { ChannelAware, SoftDeletable } from '../common/types/common-types';
 import { EntityAccessControlStrategy } from '../config/auth/entity-access-control-strategy';
-import { NoopEntityAccessControlStrategy } from '../config/auth/noop-entity-access-control-strategy';
 import { ConfigService } from '../config/config.service';
 import { VendureEntity } from '../entity/base/base.entity';
 import { joinTreeRelationsDynamically } from '../service/helpers/utils/tree-relations-qb-joiner';
@@ -125,12 +124,7 @@ export class TransactionalConnection {
                 repo = this.rawConnection.getRepository(maybeTarget!);
             }
             const strategy = this.configService.authOptions.entityAccessControlStrategy;
-            if (
-                strategy &&
-                !(strategy instanceof NoopEntityAccessControlStrategy) &&
-                maybeTarget &&
-                typeof maybeTarget === 'function'
-            ) {
+            if (strategy?.applyAccessControl && maybeTarget && typeof maybeTarget === 'function') {
                 return this.wrapWithAccessControl(repo, maybeTarget, ctxOrTarget, strategy);
             }
             return repo;
@@ -349,7 +343,7 @@ export class TransactionalConnection {
             .andWhere('entity.id = :id', { id })
             .andWhere('__channel.id = :channelId', { channelId });
 
-        this.configService.authOptions.entityAccessControlStrategy?.applyAccessControl(qb, entity, ctx);
+        this.configService.authOptions.entityAccessControlStrategy?.applyAccessControl?.(qb, entity, ctx);
 
         return qb.getOne().then(result => {
             return result ?? undefined;
@@ -396,7 +390,7 @@ export class TransactionalConnection {
             .andWhere('entity.id IN (:...ids)', { ids })
             .andWhere('channel.id = :channelId', { channelId });
 
-        this.configService.authOptions.entityAccessControlStrategy?.applyAccessControl(
+        this.configService.authOptions.entityAccessControlStrategy?.applyAccessControl?.(
             qb as SelectQueryBuilder<VendureEntity>,
             entity as any,
             ctx,
@@ -419,7 +413,7 @@ export class TransactionalConnection {
                         const alias = obj.metadata.name;
                         const qb = obj.createQueryBuilder(alias);
                         qb.setFindOptions(options as FindManyOptions<Entity>);
-                        strategy.applyAccessControl(qb as SelectQueryBuilder<any>, target as any, ctx);
+                        strategy.applyAccessControl?.(qb as SelectQueryBuilder<any>, target as any, ctx);
                         switch (prop) {
                             case 'find':
                                 return qb.getMany();
