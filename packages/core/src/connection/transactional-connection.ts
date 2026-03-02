@@ -9,9 +9,9 @@ import {
     FindOneOptions,
     ObjectLiteral,
     ObjectType,
+    ReplicationMode,
     Repository,
     SelectQueryBuilder,
-    ReplicationMode,
 } from 'typeorm';
 
 import { RequestContext } from '../api/common/request-context';
@@ -19,6 +19,9 @@ import { TransactionIsolationLevel } from '../api/decorators/transaction.decorat
 import { TRANSACTION_MANAGER_KEY } from '../common/constants';
 import { EntityNotFoundError } from '../common/error/errors';
 import { ChannelAware, SoftDeletable } from '../common/types/common-types';
+import { EntityAccessControlStrategy } from '../config/auth/entity-access-control-strategy';
+import { NoopEntityAccessControlStrategy } from '../config/auth/noop-entity-access-control-strategy';
+import { ConfigService } from '../config/config.service';
 import { VendureEntity } from '../entity/base/base.entity';
 import { joinTreeRelationsDynamically } from '../service/helpers/utils/tree-relations-qb-joiner';
 
@@ -43,6 +46,7 @@ export class TransactionalConnection {
     constructor(
         @InjectDataSource() private dataSource: DataSource,
         private transactionWrapper: TransactionWrapper,
+        private configService: ConfigService,
     ) {}
 
     /**
@@ -109,24 +113,34 @@ export class TransactionalConnection {
     ): Repository<Entity> {
         if (ctxOrTarget instanceof RequestContext) {
             const transactionManager = this.getTransactionManager(ctxOrTarget);
+            let repo: Repository<Entity>;
             if (transactionManager) {
                 // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-                return transactionManager.getRepository(maybeTarget!);
-            }
-
-            if (ctxOrTarget.replicationMode === 'master' || options?.replicationMode === 'master') {
+                repo = transactionManager.getRepository(maybeTarget!);
+            } else if (ctxOrTarget.replicationMode === 'master' || options?.replicationMode === 'master') {
                 // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-                return this.dataSource.createQueryRunner('master').manager.getRepository(maybeTarget!);
+                repo = this.dataSource.createQueryRunner('master').manager.getRepository(maybeTarget!);
+            } else {
+                // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+                repo = this.rawConnection.getRepository(maybeTarget!);
             }
-
-            // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-            return this.rawConnection.getRepository(maybeTarget!);
+            const strategy = this.configService.authOptions.entityAccessControlStrategy;
+            if (
+                strategy &&
+                !(strategy instanceof NoopEntityAccessControlStrategy) &&
+                maybeTarget &&
+                typeof maybeTarget === 'function'
+            ) {
+                return this.wrapWithAccessControl(repo, maybeTarget, ctxOrTarget, strategy);
+            }
+            return repo;
         } else {
             if (options?.replicationMode === 'master') {
-                // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+                /* eslint-disable @typescript-eslint/no-non-null-assertion */
                 return this.dataSource
                     .createQueryRunner(options.replicationMode)
                     .manager.getRepository(maybeTarget!);
+                /* eslint-enable @typescript-eslint/no-non-null-assertion */
             }
             // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
             return this.rawConnection.getRepository(ctxOrTarget ?? maybeTarget!);
@@ -335,6 +349,8 @@ export class TransactionalConnection {
             .andWhere('entity.id = :id', { id })
             .andWhere('__channel.id = :channelId', { channelId });
 
+        this.configService.authOptions.entityAccessControlStrategy?.applyAccessControl(qb, entity, ctx);
+
         return qb.getOne().then(result => {
             return result ?? undefined;
         });
@@ -376,11 +392,58 @@ export class TransactionalConnection {
             ...options,
         });
 
-        return qb
-            .leftJoin('entity.channels', 'channel')
+        qb.leftJoin('entity.channels', 'channel')
             .andWhere('entity.id IN (:...ids)', { ids })
-            .andWhere('channel.id = :channelId', { channelId })
-            .getMany();
+            .andWhere('channel.id = :channelId', { channelId });
+
+        this.configService.authOptions.entityAccessControlStrategy?.applyAccessControl(
+            qb as SelectQueryBuilder<VendureEntity>,
+            entity as any,
+            ctx,
+        );
+
+        return qb.getMany();
+    }
+
+    private wrapWithAccessControl<Entity extends ObjectLiteral>(
+        repo: Repository<Entity>,
+        target: ObjectType<Entity>,
+        ctx: RequestContext,
+        strategy: EntityAccessControlStrategy,
+    ): Repository<Entity> {
+        const interceptedMethods = new Set(['find', 'findOne', 'findOneOrFail', 'findAndCount', 'count']);
+        return new Proxy(repo, {
+            get(obj, prop, receiver) {
+                if (typeof prop === 'string' && interceptedMethods.has(prop)) {
+                    return (options: FindOneOptions<Entity> | FindManyOptions<Entity> = {}) => {
+                        const alias = obj.metadata.name;
+                        const qb = obj.createQueryBuilder(alias);
+                        qb.setFindOptions(options as FindManyOptions<Entity>);
+                        strategy.applyAccessControl(qb as SelectQueryBuilder<any>, target as any, ctx);
+                        switch (prop) {
+                            case 'find':
+                                return qb.getMany();
+                            case 'findOne': {
+                                if (!(options as FindOneOptions<Entity>).where) {
+                                    return Promise.resolve(null);
+                                }
+                                return qb.getOne();
+                            }
+                            case 'findOneOrFail': {
+                                return qb.getOneOrFail();
+                            }
+                            case 'findAndCount':
+                                return qb.getManyAndCount();
+                            case 'count':
+                                return qb.getCount();
+                            default:
+                                return qb.getMany();
+                        }
+                    };
+                }
+                return Reflect.get(obj, prop, receiver);
+            },
+        });
     }
 
     private getTransactionManager(ctx: RequestContext): EntityManager | undefined {

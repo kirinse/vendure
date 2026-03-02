@@ -17,6 +17,7 @@ import { AssetNamingStrategy } from './asset-naming-strategy/asset-naming-strate
 import { AssetPreviewStrategy } from './asset-preview-strategy/asset-preview-strategy';
 import { AssetStorageStrategy } from './asset-storage-strategy/asset-storage-strategy';
 import { AuthenticationStrategy } from './auth/authentication-strategy';
+import { EntityAccessControlStrategy } from './auth/entity-access-control-strategy';
 import { PasswordHashingStrategy } from './auth/password-hashing-strategy';
 import { PasswordValidationStrategy } from './auth/password-validation-strategy';
 import { VerificationTokenStrategy } from './auth/verification-token-strategy';
@@ -512,6 +513,17 @@ export interface AuthOptions {
      * @since 3.2.0
      */
     verificationTokenStrategy?: VerificationTokenStrategy;
+    /**
+     * @description
+     * Allows you to define row-level access control for entity queries. When set,
+     * the strategy's `applyAccessControl()` method will be invoked for every entity
+     * query that goes through Vendure's data access layer, allowing you to restrict
+     * which entities are visible to the current user.
+     *
+     * @default undefined
+     * @since 3.3.0
+     */
+    entityAccessControlStrategy?: EntityAccessControlStrategy;
 }
 
 /**
